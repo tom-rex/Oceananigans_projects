@@ -2,23 +2,21 @@ using Oceananigans #use v.1.10
 using Oceananigans.Units
 using Oceananigans.OutputReaders: FieldTimeSeries
 using Oceananigans.BoundaryConditions
-using CairoMakie 
+using Oceananigans.TurbulenceClosures
+#using CairoMakie 
 using NCDatasets
 
 
-
-
-
 # Model parameters
-Nx = 240
-Ny = 80
+Nx = 6400
+Nz = 100
 f = 1e-4               # Coriolis frequency [s⁻¹]
 L_front = 10kilometers  # Initial front width [m]
 aspect_ratio = 100      # L/H
-δ = 0                   # Strain ratio (α/f)
-Ro = 1               # Rossby number (defines M^2)
-F = Inf                 # Froude number (N² = M²/(F²H))
-Re_h = 5e2         # horizontal reynolds number
+δ = 0                  # Strain ratio (α/f)
+Ro = 2           # Rossby number (defines M^2)
+F = 2              # Froude number (N² = M²/(F²H))
+Re_h = 500   # horizontal reynolds number
 Re_v = +Inf              #vertical reynolds number
 n = 2              #diffusivity number                 
 
@@ -36,7 +34,10 @@ Bu = Ro/F
 κv = κh*(Re_h/Re_v)*(H_front/L_front)^n
 
 
-filename = "δ="*string(δ)*"_Ro="*string(Ro)*"_F = "*string(F)*"_Re_h="*string(Re_h)
+
+
+filename = "ST13_δ="*string(δ)*"_Ro="*string(Ro)*"_F="*string(F)*"_Re_h="*string(Re_h)
+filename = "δ=0_Ro=4_F=0.4_Re_h=500.0.nc"
 
 println("Filename: ", filename)
 println("\nDerived parameters:")
@@ -50,24 +51,25 @@ println("κv = ", κv)
 
 
 
-
-Lx = 16*L_front #40kilometers
+Lx = 64*L_front #40kilometers
 Lz = H_front
 
-grid = RectilinearGrid(size = (Nx, Ny), #in ST15 they use Nx = 200*L_front, Nz = 100*H_front
+grid = RectilinearGrid(size = (Nx, Nz), #in ST15 they use Nx = 200*L_front, Nz = 100*H_front
                        x = (-Lx/2, Lx/2),
                        z = (-Lz, 0),
                        topology = (Bounded, Flat, Bounded))
 
 
-
-
-                       # advective forcing term 
+# advective forcing term 
 u_background = XFaceField(grid)
-u_background .= - α * xnodes(grid, Face(), Center(), Center())
+u_background = - α * xnodes(grid, Face(), Center(), Center())
 background_flow = AdvectiveForcing(u = u_background)
 
 # no addtional u forcing
+
+
+
+
 
 # v forcing
 v_forcing_func(x, z, t, v, α) = - 2*α*v
@@ -102,9 +104,6 @@ right_mask(x,z) = right_mask_3D(x,0,z)
 uvw_sponge_right = Relaxation(rate=damping_rate, mask=right_mask)
 b_sponge_right = Relaxation(rate=damping_rate, mask=right_mask, target = target_buoyancy_right ) 
 
-#b_sponge = Relaxation(rate=damping_rate, target = target_buoyancy)
-
-
 
 
 
@@ -131,7 +130,6 @@ velocity_bcs = (
 
 
 
-
 ∂b∂z_top = N²
 ∂b∂z_bottom = N²
 
@@ -146,8 +144,10 @@ vertical_closure = VerticalScalarDiffusivity(ν=κv , κ=κv )
 closure = (horizontal_closure, vertical_closure)
 
 
+
 #with sponge
 
+#=
 model = NonhydrostaticModel(; grid,
                 coriolis = FPlane(f = f),
                 buoyancy = BuoyancyTracer(),
@@ -159,11 +159,12 @@ model = NonhydrostaticModel(; grid,
                              b = (background_flow, b_forcing, b_sponge_left, b_sponge_right)),
                 boundary_conditions = (; b=buoyancy_bcs, velocity_bcs),
                 closure = closure
-                )
 
+                )
+=#
 
 #without sponge 
-#=
+
 model = NonhydrostaticModel(; grid,
                 coriolis = FPlane(f = f),
                 buoyancy = BuoyancyTracer(),
@@ -175,27 +176,28 @@ model = NonhydrostaticModel(; grid,
                              b = (background_flow, b_forcing))
                 #boundary_conditions = (; b=buoyancy_bcs, velocity_bcs)
                 )
-=#
+
 
 
 #inital setup
 
-Δb = L_front * M²       # buoyancy jump across front
-ϵb = 1e-2 * Δb   
+Δb = L_front * M²  # buoyancy jump across front  
+
+bᵢ(x, z) = N² * z + Δb * 1/2* (tanh(x/L_front) + 1) #for ST13 setup
+
+#thermal_wind_balance(x,z) = (1/2 * N² * z^2 + Δb * 1/2* z * (tanh(x/L_front) + 1))/f
+
+#bᵢ(x, z) = N² * z + Δb * 1/2* (sin(x/L_front) + 1)  #for B00 setup
 
 
-bᵢ(x, z) = N² * z + Δb * 1/2* (tanh(x/L_front) + 1)  
-
-set!(model, b=bᵢ, u = 0, v = 0, w = 0)  # Start from rest
+set!(model, b= bᵢ, u = 0, v = 0, w = 0)  # Start from rest
 
 
 
-simulation = Simulation(model, Δt=20minutes, stop_time=10days)
-
+simulation = Simulation(model, Δt=20minutes, stop_time=30days)
 
 
 conjure_time_step_wizard!(simulation, IterationInterval(20), cfl=0.2, max_Δt=20minutes)
-
 
 
 
@@ -221,12 +223,27 @@ add_callback!(simulation, print_progress, IterationInterval(100))
 
 
 
-
 # Output setup
+g = 9.81
 u, v, w = model.velocities
 ζ = ∂z(u) - ∂x(w)  # Vorticity in x-z plane
 b = model.tracers.b
+
+# Compute Ri
 Ri = N² / (∂z(u)^2 + ∂z(v)^2) 
+M_squared = ∂x(b)
+
+#X = x + v/f
+dbdX = ∂x(b)*(1/(1 + (1/f) * ∂x(v)))
+
+dvdX = ∂x(v)*(1/(1 + (1/f) * ∂x(v)))
+
+dvdz = ∂z(v)
+
+dbdx = ∂x(b)
+
+
+
 
 #=
 #For Julia animation
@@ -237,13 +254,17 @@ simulation.output_writers[:fields] = JLD2Writer(
     overwrite_existing=true
     )
 =#
+#=
+
+#For Lagrangian filtering
+simulation.output_writers[:fields] = JLD2Writer(
+    model, (; b, u, v, w, Ri, M_squared, dbdX), filename=filename * ".jld2", schedule=TimeInterval(10minutes), overwrite_existing=true)
+=#
 
 
-#For python viusalisation
+#for python visualisation
 simulation.output_writers[:fields] = NetCDFWriter(
-    model, (; b, u, v, w, Ri), filename=filename * ".nc", schedule=TimeInterval(10minutes), overwrite_existing=true)
-
-
+    model, (; b, u, v, w, Ri, M_squared, dbdX, dvdX, dvdz, dbdx), filename=filename * ".nc", schedule=TimeInterval(10minutes), overwrite_existing=true)
 
 
 @info "Running the simulation..."
@@ -251,5 +272,3 @@ simulation.output_writers[:fields] = NetCDFWriter(
 run!(simulation)
 
 @info "Simulation completed in " * prettytime(simulation.run_wall_time)
-
-
